@@ -1,0 +1,27 @@
+name: Build iOS Dylib
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Compile GMUnlocker.dylib
+        run: |
+          xcrun -sdk iphoneos clang -target arm64-apple-ios14.0 \
+            -fobjc-arc \
+            -shared \
+            -framework UIKit \
+            -framework Foundation \
+            -o GMUnlocker.dylib \
+            GMUnlocker.m
+
+      - name: Upload Dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GMUnlocker-dylib
+          path: GMUnlocker.dylib
