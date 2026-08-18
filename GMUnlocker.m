@@ -133,7 +133,7 @@ static id GM_ivarValue(id obj, NSString *name) {
     NSMutableString *diag = [NSMutableString stringWithFormat:@"class=%@\n",
                              NSStringFromClass([self class])];
     NSMutableArray<UIView *> *gmViews = [NSMutableArray array];
-    id realBtn = nil;
+    __block id realBtn = nil; // 修复 1：添加 __block 修饰
 
     GM_scanIvars(self, @"GM", ^(NSString *nm, id v) {
         [diag appendFormat:@"- ivar %@ = %@\n", nm,
@@ -177,8 +177,10 @@ static id GM_ivarValue(id obj, NSString *name) {
         // 策略 1：真按钮当 sender
         id payload = [realBtn isKindOfClass:UIButton.class] ? realBtn : self;
         ((void (*)(id, SEL, id))objc_msgSend)(self, s1, payload);
+        
+        // 修复 2：使用标准的 C 指针判等代替不存在的 isSameObject:
         [diag appendFormat:@"call#1 payload=%@\n",
-         [payload isSameObject:self] ? @"self" : @"real LPGMButton"];
+         (payload == self) ? @"self" : @"real LPGMButton"];
     }
     [self gm2_step:1 diag:diag views:gmViews sender:sender realBtn:realBtn];
 }
@@ -246,7 +248,12 @@ static id GM_ivarValue(id obj, NSString *name) {
 
 - (void)gm2_showDiag:(NSString *)diag on:(GMSuspendButton *)sender reuse:(BOOL)afterFail {
     NSString *body = diag;
-    if (body.length > 1400) body = [body substringToIndex:1400] + @"\u2026(截断)";
+    
+    // 修复 3：使用 stringByAppendingString 代替 + 号拼接字符串
+    if (body.length > 1400) {
+        body = [[body substringToIndex:1400] stringByAppendingString:@"\u2026(\u622a\u65ad)"];
+    }
+    
     UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:[NSString stringWithFormat:@"GM \u8bca\u65ad (%@)",
                                   afterFail ? @"\u5931\u8d25" : @"\u8be6\u60c5"]
