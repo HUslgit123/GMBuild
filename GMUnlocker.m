@@ -1,8 +1,8 @@
 // =============================================================================
-// GMUnlocker_Final.m —— 终极完整版
-// 1. 内存级 Patch：3处广告拦截门禁 (NOP) + 1处 GM 全局布尔门禁 (Force Branch)
-// 2. 伪造发奖回调：秒领激励视频奖励（灵石+20）
-// 3. 原生 GM 面板唤醒：放行构建门禁 + 视图安全兜底解隐置顶
+// GMUnlocker_Final.m —— 终极整合版
+// 1. 内存级 Patch：解除广告冷却与日限
+// 2. 伪造发奖回调：直接触发激励视频奖励
+// 3. 原生 GM 面板唤醒：直接调用底层构建函数 (0x1005e5694) + 视图安全解隐置顶
 // =============================================================================
 
 #import <UIKit/UIKit.h>
@@ -16,7 +16,7 @@
 #define BTN_TAG_AD     77702
 
 // -------------------------------------------------------------
-// 1. 内存指令级 Patch (彻底解除广告限制与 GM 调试门禁)
+// 1. 内存指令级 Patch (解除广告30分钟与24次限制)
 // -------------------------------------------------------------
 static void patchAllGates(void) {
     static dispatch_once_t onceToken;
@@ -26,7 +26,6 @@ static void patchAllGates(void) {
         
         long pageSize = sysconf(_SC_PAGESIZE);
         
-        // 需要 Patch 的关键地址与对应替换机器码
         struct PatchEntry {
             uintptr_t offset;
             uint32_t instruction;
@@ -34,8 +33,7 @@ static void patchAllGates(void) {
         } patches[] = {
             { 0x75144,  0xD503201F, "广告30分钟冷却拦截 (b.ge -> NOP)" },
             { 0x75240,  0xD503201F, "广告每日24次上限拦截 (b.ge -> NOP)" },
-            { 0x9428c8, 0xD503201F, "商城每日广告拦截 (b.ge -> NOP)" },
-            { 0x59cc70, 0x14000002, "GM构建布尔门禁 (tbnz -> b +8 强制构建)" }
+            { 0x9428c8, 0xD503201F, "商城每日广告拦截 (b.ge -> NOP)" }
         };
         
         size_t count = sizeof(patches) / sizeof(patches[0]);
@@ -47,15 +45,13 @@ static void patchAllGates(void) {
                 *(uint32_t *)targetAddr = patches[i].instruction;
                 mprotect((void *)pageStart, pageSize, PROT_READ | PROT_EXEC);
                 NSLog(@"[GM_FINAL] 成功 Patch: %s (0x%lx)", patches[i].desc, targetAddr);
-            } else {
-                NSLog(@"[GM_FINAL] Patch 权限修改失败: %s", patches[i].desc);
             }
         }
     });
 }
 
 // -------------------------------------------------------------
-// 2. 悬浮拖拽按钮组件
+// 2. 悬浮拖拽按钮实现
 // -------------------------------------------------------------
 @interface GMSuspendButton : UIButton
 @property (nonatomic, assign) CGPoint beginPoint;
@@ -79,14 +75,13 @@ static void patchAllGates(void) {
 @end
 
 // -------------------------------------------------------------
-// 3. 视图生命周期注入与主控制逻辑
+// 3. 视图生命周期注入与控制逻辑
 // -------------------------------------------------------------
 @implementation UIViewController (GMUnlockerFinal)
 
 + (void)load {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // 启动时立即修补全部内存门禁
         patchAllGates();
         
         Method orig = class_getInstanceMethod(self, @selector(viewDidAppear:));
@@ -100,7 +95,7 @@ static void patchAllGates(void) {
     
     NSString *clsName = NSStringFromClass([self class]);
     
-    // 【背包界面】：添加 GM 唤醒按钮
+    // 背包界面：添加 GM 面板按钮
     if ([clsName containsString:@"BagViewController"] && ![self.view viewWithTag:BTN_TAG_GM]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GMSuspendButton *btn = [self gm_createButtonWithTitle:@"★ GM ★"
@@ -113,7 +108,7 @@ static void patchAllGates(void) {
         });
     }
     
-    // 【商城 / 设置界面】：添加免广告秒发奖按钮
+    // 商城或配置界面：添加免看广告领奖按钮
     if (([clsName containsString:@"ShopViewController"] || [clsName containsString:@"OptionViewController"])
         && ![self.view viewWithTag:BTN_TAG_AD]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -149,24 +144,37 @@ static void patchAllGates(void) {
 }
 
 // -------------------------------------------------------------
-// 【核心功能 1】：唤醒原生 GM 面板
+// 【核心功能 1】：唤醒原生 GM 面板（直接执行构建函数 + 安全解隐）
 // -------------------------------------------------------------
 - (void)gm_onTapGMButton:(GMSuspendButton *)sender {
-    // 步骤 1：触发原生调用（由于内存已 Patch，内部直接跳入面板构建代码）
-    SEL gmSel = NSSelectorFromString(@"clickGMButtonWithButton:");
-    if ([self respondsToSelector:gmSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, sender);
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    uintptr_t base  = 0x100000000 + slide;
+    
+    // 1. 设置数据段全局变量 (0x100f504a8)
+    uint8_t *pGlobalDebug = (uint8_t *)(base + 0x00f504a8);
+    if (pGlobalDebug) {
+        *pGlobalDebug = 0;
     }
     
-    // 步骤 2：延迟 0.15s 进行安全置顶与解隐兜底（确保动态创建的视图彻底展示）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 2. 直接调用 GM 面板底层构建函数 (0x1005e5694)
+    typedef void (*GMBuildFunc)(id self_vc);
+    GMBuildFunc buildGM = (GMBuildFunc)(base + 0x5e5694);
+    
+    @try {
+        buildGM(self);
+        NSLog(@"[GM_FINAL] 成功直接调用 GM 构建入口: 0x%lx", (uintptr_t)buildGM);
+    } @catch (NSException *e) {
+        NSLog(@"[GM_FINAL] 调用构建入口异常: %@", e);
+    }
+    
+    // 3. 延迟 0.1 秒将生成的 GM 视图置顶显示
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         Class curCls = [self class];
         while (curCls && curCls != [NSObject class]) {
             unsigned int count = 0;
             Ivar *ivars = class_copyIvarList(curCls, &count);
             for (unsigned int i = 0; i < count; i++) {
                 const char *type = ivar_getTypeEncoding(ivars[i]);
-                // 严格类型保护：仅解引用标准 OC 对象指针，杜绝野指针崩溃
                 if (type && type[0] == '@') {
                     id val = object_getIvar(self, ivars[i]);
                     if ([val isKindOfClass:[UIView class]]) {
@@ -188,15 +196,13 @@ static void patchAllGates(void) {
 }
 
 // -------------------------------------------------------------
-// 【核心功能 2】：免看广告直接发奖
+// 【核心功能 2】：免看广告秒领奖
 // -------------------------------------------------------------
 - (void)gm_onTapRewardButton:(GMSuspendButton *)sender {
     SEL rewardSel = NSSelectorFromString(@"gdt_rewardVideoAdDidRewardEffective:info:");
     if ([self respondsToSelector:rewardSel]) {
-        // 直接触发底层的发奖代理回调，传入安全空参数
         ((void (*)(id, SEL, id, id))objc_msgSend)(self, rewardSel, nil, nil);
         
-        // 视觉反馈
         [sender setTitle:@"✓已发放" forState:UIControlStateNormal];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [sender setTitle:@"⚡领奖励" forState:UIControlStateNormal];
