@@ -1,5 +1,5 @@
 // =============================================================================
-// GMUnlocker.m —— 终极版（UI 坐标修复 + 全局视图打捞置顶）
+// GMUnlocker.m —— 终极版（内存 Class 指针直读 + isa 强转 + 真实回读）
 // =============================================================================
 
 #import <UIKit/UIKit.h>
@@ -37,18 +37,23 @@
 @end
 
 // -------------------------------------------------------------
-// 2. 核心辅助：动态类查找与全局视图打捞置顶
+// 2. 核心辅助：获取真实 Class 与全局视图打捞
 // -------------------------------------------------------------
-static Class GM_findClass(NSString *name) {
-    Class cls = NSClassFromString(name);
-    if (cls) return cls;
+static Class GM_getRealLPGMButtonClass(uintptr_t base) {
+    // 1. 优先从 classref 地址 (0x100f1f568) 直接读取类指针
+    uintptr_t classRefAddr = base + 0xf1f568;
+    Class cls = *(Class *)classRefAddr;
+    if (cls && class_getName(cls)) {
+        return cls;
+    }
     
+    // 2. 备选方案：符号表全量遍历匹配
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (classes) {
         for (unsigned int i = 0; i < count; i++) {
             NSString *curName = NSStringFromClass(classes[i]);
-            if ([curName hasSuffix:name] || [curName containsString:name]) {
+            if ([curName containsString:@"LPGMButton"]) {
                 cls = classes[i];
                 break;
             }
@@ -58,31 +63,27 @@ static Class GM_findClass(NSString *name) {
     return cls;
 }
 
-// 递归查找并把所有 GM 相关的视图打捞到最顶层 Window
+// 递归查找并将所有 GM 视图强制置顶与显形
 static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
     if (!rootView) return;
     
     for (UIView *subview in [rootView.subviews copy]) {
         NSString *clsName = NSStringFromClass([subview class]);
-        
-        // 匹配所有 GM 核心组件
         if ([clsName containsString:@"GM"] || [clsName containsString:@"LP"] || [clsName containsString:@"Table"]) {
             if (![subview isKindOfClass:[GMSuspendButton class]] && subview.tag != BTN_TAG_NATIVE) {
                 subview.hidden = NO;
                 subview.alpha = 1.0;
                 subview.userInteractionEnabled = YES;
                 
-                // 如果尺寸异常，修正为居中显示
                 if (subview.bounds.size.width < 50 || subview.bounds.size.height < 50) {
-                    subview.frame = CGRectMake(20, 100, [UIScreen mainScreen].bounds.size.width - 40, [UIScreen mainScreen].bounds.size.height - 200);
+                    subview.frame = CGRectMake(20, 80, [UIScreen mainScreen].bounds.size.width - 40, [UIScreen mainScreen].bounds.size.height - 160);
                 }
                 
-                // 挂载到主 Window 顶层
                 if (targetWindow && subview.superview != targetWindow) {
                     [targetWindow addSubview:subview];
                 }
                 [subview.superview bringSubviewToFront:subview];
-                NSLog(@"[GM5] 成功打捞并置顶 GM 视图: %@, Frame: %@", clsName, NSStringFromCGRect(subview.frame));
+                NSLog(@"[GM5] 打捞并置顶 GM 视图: %@", clsName);
             }
         }
         GM_rescueAllGMViews(subview, targetWindow);
@@ -108,16 +109,45 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
     
     NSString *clsName = NSStringFromClass([self class]);
     
-    // 【背包界面】：添加 GM 悬浮按钮
-    if ([clsName containsString:@"BagViewController"] && ![self.view viewWithTag:BTN_TAG_GM]) {
+    // 【背包界面】：添加 GM 悬浮按钮与原生实体按钮
+    if ([clsName containsString:@"BagViewController"]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            GMSuspendButton *btn = [self gm_createButtonWithTitle:@"★ GM ★"
-                                                            color:[UIColor colorWithRed:0.85 green:0.2 blue:0.2 alpha:0.92]
-                                                            frame:CGRectMake(self.view.bounds.size.width - 85, 120, 75, 34)
-                                                              tag:BTN_TAG_GM
-                                                           action:@selector(gm_onTapGMButton:)];
-            [self.view addSubview:btn];
-            [self.view bringSubviewToFront:btn];
+            uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+            uintptr_t base  = 0x100000000 + slide;
+            Class gmClass   = GM_getRealLPGMButtonClass(base);
+            
+            // 1. 创建悬浮控制器按钮
+            if (![self.view viewWithTag:BTN_TAG_GM]) {
+                GMSuspendButton *btn = [self gm_createButtonWithTitle:@"★ GM ★"
+                                                                color:[UIColor colorWithRed:0.85 green:0.2 blue:0.2 alpha:0.92]
+                                                                frame:CGRectMake(self.view.bounds.size.width - 85, 120, 75, 34)
+                                                                  tag:BTN_TAG_GM
+                                                               action:@selector(gm_onTapGMButton:)];
+                [self.view addSubview:btn];
+                [self.view bringSubviewToFront:btn];
+            }
+            
+            // 2. 创建可见的实体 GM 原生按钮（放置在屏幕顶部）
+            if (![self.view viewWithTag:BTN_TAG_NATIVE]) {
+                UIButton *nativeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
+                nativeBtn.tag = BTN_TAG_NATIVE;
+                nativeBtn.frame = CGRectMake(20, 70, 110, 36);
+                [nativeBtn setTitle:@"⚡原生GM" forState:UIControlStateNormal];
+                nativeBtn.backgroundColor = [UIColor colorWithRed:0.55 green:0.15 blue:0.85 alpha:0.95];
+                nativeBtn.layer.cornerRadius = 8;
+                nativeBtn.layer.borderWidth = 1.0;
+                nativeBtn.layer.borderColor = [UIColor whiteColor].CGColor;
+                nativeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+                [nativeBtn addTarget:self action:@selector(gm_onTapGMButton:) forControlEvents:UIControlEventTouchUpInside];
+                
+                // 强制将 isa 修改为 LPGMButton
+                if (gmClass) {
+                    object_setClass(nativeBtn, gmClass);
+                }
+                
+                [self.view addSubview:nativeBtn];
+                [self.view bringSubviewToFront:nativeBtn];
+            }
         });
     }
     
@@ -157,13 +187,13 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
 }
 
 // -------------------------------------------------------------
-// 【核心功能 1】：唤醒原生 GM 面板（带屏幕正坐标与视图打捞）
+// 【核心功能 1】：唤醒原生 GM 面板
 // -------------------------------------------------------------
-- (void)gm_onTapGMButton:(GMSuspendButton *)sender {
+- (void)gm_onTapGMButton:(id)sender {
     uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
     uintptr_t base  = 0x100000000 + slide;
     
-    // 1. 即时重写 BSS 闸门（A=0, B=1）
+    // 1. 即时写入 Gate A (*pA = 0) 与 Gate B (*pB = 1)
     uint8_t *pGateA = (uint8_t *)(base + 0x00f504a8);
     uint8_t *pGateB = (uint8_t *)(base + 0x00f504a9);
     if (pGateA && pGateB) {
@@ -171,39 +201,35 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
         *pGateB = 1;
     }
     
-    // 2. 构造真 LPGMButton 实例，并放置在屏幕正中可见区域作为有效锚点
-    Class gmBtnClass = GM_findClass(@"LPGMButton");
-    id realSender = [self.view viewWithTag:BTN_TAG_NATIVE];
-    
-    if (!realSender && gmBtnClass) {
-        UIButton *nativeBtn = [[gmBtnClass alloc] initWithFrame:CGRectMake(20, 80, 110, 36)];
-        nativeBtn.tag = BTN_TAG_NATIVE;
-        [nativeBtn setTitle:@"[原生GM入口]" forState:UIControlStateNormal];
-        nativeBtn.backgroundColor = [UIColor colorWithRed:0.5 green:0.1 blue:0.8 alpha:0.9];
-        nativeBtn.layer.cornerRadius = 8;
-        nativeBtn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-        [self.view addSubview:nativeBtn];
-        [self.view bringSubviewToFront:nativeBtn];
-        realSender = nativeBtn;
-        NSLog(@"[GM5] 已在背包界面创建原生 GM 入口按钮: %@", nativeBtn);
+    // 2. 准备合法 sender (必须带 LPGMButton 的 isa)
+    Class gmClass = GM_getRealLPGMButtonClass(base);
+    UIView *targetSender = [self.view viewWithTag:BTN_TAG_NATIVE];
+    if (!targetSender) targetSender = sender;
+    if (gmClass && targetSender) {
+        object_setClass(targetSender, gmClass);
     }
-    if (!realSender) realSender = sender;
     
-    // 3. 发送官方消息
+    // 3. 触发官方入口或直调构建器
     SEL gmSel = NSSelectorFromString(@"clickGMButtonWithButton:");
     if ([self respondsToSelector:gmSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, realSender);
+        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, targetSender);
     } else {
         typedef void (*GMBuilderFunc)(id sender_btn);
         GMBuilderFunc builder = (GMBuilderFunc)(base + 0x59c638);
         @try {
-            builder(realSender);
+            builder(targetSender);
         } @catch (NSException *e) {}
     }
     
-    [sender setTitle:@"✓已激活" forState:UIControlStateNormal];
+    // 4. 真实回读状态：判断是否真的通过了全部 3 道闸门
+    GMSuspendButton *gmBtn = (GMSuspendButton *)[self.view viewWithTag:BTN_TAG_GM];
+    if (pGateB && *pGateB == 0) {
+        [gmBtn setTitle:@"✓放行成功" forState:UIControlStateNormal];
+    } else {
+        [gmBtn setTitle:@"✗卡GateC" forState:UIControlStateNormal];
+    }
     
-    // 4. 延迟 0.15 秒打捞所有生成的 GM 视图并强制置顶
+    // 5. 延迟 0.15 秒打捞并置顶所有 GM 视图
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
         if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) {
@@ -214,6 +240,10 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
         if (keyWindow) {
             GM_rescueAllGMViews(keyWindow, keyWindow);
         }
+        
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [gmBtn setTitle:@"★ GM ★" forState:UIControlStateNormal];
+        });
     });
 }
 
