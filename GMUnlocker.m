@@ -1,5 +1,5 @@
 // =============================================================================
-// GMUnlocker.m —— 终极版（内存 Class 指针直读 + isa 强转 + 真实回读）
+// GMUnlocker.m —— 终极版（修复 ARC 编译报错 + Class 指针直读 + 视图打捞）
 // =============================================================================
 
 #import <UIKit/UIKit.h>
@@ -37,17 +37,18 @@
 @end
 
 // -------------------------------------------------------------
-// 2. 核心辅助：获取真实 Class 与全局视图打捞
+// 2. 核心辅助：安全获取 Class 与视图打捞
 // -------------------------------------------------------------
 static Class GM_getRealLPGMButtonClass(uintptr_t base) {
-    // 1. 优先从 classref 地址 (0x100f1f568) 直接读取类指针
+    // 1. 优先从 classref 地址 (0x100f1f568) 安全读取类指针 (ARC 兼容)
     uintptr_t classRefAddr = base + 0xf1f568;
-    Class cls = *(Class *)classRefAddr;
+    void *ptr = *(void **)classRefAddr;
+    Class cls = (__bridge Class)ptr;
     if (cls && class_getName(cls)) {
         return cls;
     }
     
-    // 2. 备选方案：符号表全量遍历匹配
+    // 2. 备选方案：全量遍历类列表匹配
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (classes) {
@@ -127,7 +128,7 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
                 [self.view bringSubviewToFront:btn];
             }
             
-            // 2. 创建可见的实体 GM 原生按钮（放置在屏幕顶部）
+            // 2. 创建实体 GM 原生按钮（放置在屏幕顶部可见区域）
             if (![self.view viewWithTag:BTN_TAG_NATIVE]) {
                 UIButton *nativeBtn = [UIButton buttonWithType:UIButtonTypeCustom];
                 nativeBtn.tag = BTN_TAG_NATIVE;
@@ -221,7 +222,7 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
         } @catch (NSException *e) {}
     }
     
-    // 4. 真实回读状态：判断是否真的通过了全部 3 道闸门
+    // 4. 真实回读状态：判断是否放行
     GMSuspendButton *gmBtn = (GMSuspendButton *)[self.view viewWithTag:BTN_TAG_GM];
     if (pGateB && *pGateB == 0) {
         [gmBtn setTitle:@"✓放行成功" forState:UIControlStateNormal];
@@ -231,14 +232,21 @@ static void GM_rescueAllGMViews(UIView *rootView, UIWindow *targetWindow) {
     
     // 5. 延迟 0.15 秒打捞并置顶所有 GM 视图
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-        if (!keyWindow && [UIApplication sharedApplication].windows.count > 0) {
-            keyWindow = [UIApplication sharedApplication].windows.firstObject;
+        UIWindow *targetWindow = nil;
+        NSArray<UIWindow *> *windows = [UIApplication sharedApplication].windows;
+        for (UIWindow *win in windows) {
+            if (win.isKeyWindow) {
+                targetWindow = win;
+                break;
+            }
+        }
+        if (!targetWindow && windows.count > 0) {
+            targetWindow = windows.firstObject;
         }
         
-        GM_rescueAllGMViews(self.view, keyWindow);
-        if (keyWindow) {
-            GM_rescueAllGMViews(keyWindow, keyWindow);
+        GM_rescueAllGMViews(self.view, targetWindow);
+        if (targetWindow) {
+            GM_rescueAllGMViews(targetWindow, targetWindow);
         }
         
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
