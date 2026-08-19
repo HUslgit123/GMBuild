@@ -1,57 +1,21 @@
 // =============================================================================
-// GMUnlocker_Final.m —— 终极整合版
-// 1. 内存级 Patch：解除广告冷却与日限
-// 2. 伪造发奖回调：直接触发激励视频奖励
-// 3. 原生 GM 面板唤醒：直接调用底层构建函数 (0x1005e5694) + 视图安全解隐置顶
+// GMUnlocker.m —— 终极全功能整合版
+// 1. 【GM 核心突破】：动态设置 A=0, B=1 (BSS) + 构造真 LPGMButton 实例 (过 Gate C)
+// 2. 【秒领灵石奖励】：直接伪造广点通激励视频完成回调，跳过广告秒到账
+// 3. 【纯安全实现】：零不安全 ivar 访问，纯视图树与运行时消息，杜绝崩溃闪退
 // =============================================================================
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
-#import <sys/mman.h>
 #import <unistd.h>
 
 #define BTN_TAG_GM     77701
 #define BTN_TAG_AD     77702
 
 // -------------------------------------------------------------
-// 1. 内存指令级 Patch (解除广告30分钟与24次限制)
-// -------------------------------------------------------------
-static void patchAllGates(void) {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
-        uintptr_t base  = 0x100000000 + slide;
-        
-        long pageSize = sysconf(_SC_PAGESIZE);
-        
-        struct PatchEntry {
-            uintptr_t offset;
-            uint32_t instruction;
-            const char *desc;
-        } patches[] = {
-            { 0x75144,  0xD503201F, "广告30分钟冷却拦截 (b.ge -> NOP)" },
-            { 0x75240,  0xD503201F, "广告每日24次上限拦截 (b.ge -> NOP)" },
-            { 0x9428c8, 0xD503201F, "商城每日广告拦截 (b.ge -> NOP)" }
-        };
-        
-        size_t count = sizeof(patches) / sizeof(patches[0]);
-        for (size_t i = 0; i < count; i++) {
-            uintptr_t targetAddr = base + patches[i].offset;
-            uintptr_t pageStart  = targetAddr & ~(pageSize - 1);
-            
-            if (mprotect((void *)pageStart, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
-                *(uint32_t *)targetAddr = patches[i].instruction;
-                mprotect((void *)pageStart, pageSize, PROT_READ | PROT_EXEC);
-                NSLog(@"[GM_FINAL] 成功 Patch: %s (0x%lx)", patches[i].desc, targetAddr);
-            }
-        }
-    });
-}
-
-// -------------------------------------------------------------
-// 2. 悬浮拖拽按钮实现
+// 1. 可拖拽悬浮按钮组件
 // -------------------------------------------------------------
 @interface GMSuspendButton : UIButton
 @property (nonatomic, assign) CGPoint beginPoint;
@@ -75,15 +39,51 @@ static void patchAllGates(void) {
 @end
 
 // -------------------------------------------------------------
-// 3. 视图生命周期注入与控制逻辑
+// 2. 辅助工具：动态查找 Swift / ObjC 类与递归安全解隐
+// -------------------------------------------------------------
+static Class GM_findClass(NSString *name) {
+    Class cls = NSClassFromString(name);
+    if (cls) return cls;
+    
+    // 兼容 Swift 模块前缀混淆（如 _TtC...LPGMButton）
+    unsigned int count = 0;
+    Class *classes = objc_copyClassList(&count);
+    if (classes) {
+        for (unsigned int i = 0; i < count; i++) {
+            NSString *curName = NSStringFromClass(classes[i]);
+            if ([curName hasSuffix:name] || [curName containsString:name]) {
+                cls = classes[i];
+                break;
+            }
+        }
+        free(classes);
+    }
+    return cls;
+}
+
+// 递归遍历视图树进行安全解隐与置顶（不读任何原生变量，杜绝 Bad Access）
+static void GM_unhideViewsRecursively(UIView *rootView) {
+    if (!rootView) return;
+    for (UIView *subview in rootView.subviews) {
+        NSString *clsName = NSStringFromClass([subview class]);
+        if ([clsName containsString:@"GM"] || [clsName containsString:@"LP"]) {
+            subview.hidden = NO;
+            subview.alpha = 1.0;
+            [subview.superview bringSubviewToFront:subview];
+            NSLog(@"[GM5] 找到并解隐 GM 视图: %@", clsName);
+        }
+        GM_unhideViewsRecursively(subview);
+    }
+}
+
+// -------------------------------------------------------------
+// 3. 视图生命周期注入与功能实现
 // -------------------------------------------------------------
 @implementation UIViewController (GMUnlockerFinal)
 
 + (void)load {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        patchAllGates();
-        
         Method orig = class_getInstanceMethod(self, @selector(viewDidAppear:));
         Method swiz = class_getInstanceMethod(self, @selector(gm_final_viewDidAppear:));
         method_exchangeImplementations(orig, swiz);
@@ -95,7 +95,7 @@ static void patchAllGates(void) {
     
     NSString *clsName = NSStringFromClass([self class]);
     
-    // 背包界面：添加 GM 面板按钮
+    // 【背包界面】：添加 GM 唤醒悬浮按钮
     if ([clsName containsString:@"BagViewController"] && ![self.view viewWithTag:BTN_TAG_GM]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GMSuspendButton *btn = [self gm_createButtonWithTitle:@"★ GM ★"
@@ -108,7 +108,7 @@ static void patchAllGates(void) {
         });
     }
     
-    // 商城或配置界面：添加免看广告领奖按钮
+    // 【商城 / 设置界面】：添加免广告秒发奖悬浮按钮
     if (([clsName containsString:@"ShopViewController"] || [clsName containsString:@"OptionViewController"])
         && ![self.view viewWithTag:BTN_TAG_AD]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -144,69 +144,92 @@ static void patchAllGates(void) {
 }
 
 // -------------------------------------------------------------
-// 【核心功能 1】：唤醒原生 GM 面板（直接执行构建函数 + 安全解隐）
+// 【核心功能 1】：完美破解三道门禁，唤醒原生 GM 面板
 // -------------------------------------------------------------
 - (void)gm_onTapGMButton:(GMSuspendButton *)sender {
     uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
     uintptr_t base  = 0x100000000 + slide;
     
-    // 1. 设置数据段全局变量 (0x100f504a8)
-    uint8_t *pGlobalDebug = (uint8_t *)(base + 0x00f504a8);
-    if (pGlobalDebug) {
-        *pGlobalDebug = 0;
+    // 1. 破解 Gate A 与 Gate B (BSS 段状态变量，调用前即时赋初值)
+    uint8_t *pGateA = (uint8_t *)(base + 0x00f504a8);
+    uint8_t *pGateB = (uint8_t *)(base + 0x00f504a9);
+    if (pGateA && pGateB) {
+        *pGateA = 0; // Gate A 要求: *pA == 0
+        *pGateB = 1; // Gate B 要求: *pB == 1
+        NSLog(@"[GM5] 成功重设 BSS 闸门标志: A=0, B=1");
     }
     
-    // 2. 直接调用 GM 面板底层构建函数 (0x1005e5694)
-    typedef void (*GMBuildFunc)(id self_vc);
-    GMBuildFunc buildGM = (GMBuildFunc)(base + 0x5e5694);
-    
-    @try {
-        buildGM(self);
-        NSLog(@"[GM_FINAL] 成功直接调用 GM 构建入口: 0x%lx", (uintptr_t)buildGM);
-    } @catch (NSException *e) {
-        NSLog(@"[GM_FINAL] 调用构建入口异常: %@", e);
-    }
-    
-    // 3. 延迟 0.1 秒将生成的 GM 视图置顶显示
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        Class curCls = [self class];
-        while (curCls && curCls != [NSObject class]) {
-            unsigned int count = 0;
-            Ivar *ivars = class_copyIvarList(curCls, &count);
-            for (unsigned int i = 0; i < count; i++) {
-                const char *type = ivar_getTypeEncoding(ivars[i]);
-                if (type && type[0] == '@') {
-                    id val = object_getIvar(self, ivars[i]);
-                    if ([val isKindOfClass:[UIView class]]) {
-                        UIView *v = (UIView *)val;
-                        NSString *vCls = NSStringFromClass([v class]);
-                        if ([vCls containsString:@"GM"] || [vCls containsString:@"LP"]) {
-                            if (!v.superview) [self.view addSubview:v];
-                            v.hidden = NO;
-                            v.alpha = 1.0;
-                            [v.superview bringSubviewToFront:v];
-                        }
-                    }
-                }
-            }
-            free(ivars);
-            curCls = class_getSuperclass(curCls);
+    // 2. 破解 Gate C (构造真 LPGMButton 实例，满足 isa 比对)
+    Class gmBtnClass = GM_findClass(@"LPGMButton");
+    id realSender = nil;
+    if (gmBtnClass) {
+        realSender = [[gmBtnClass alloc] initWithFrame:CGRectMake(-100, -100, 50, 50)];
+        if ([realSender isKindOfClass:[UIView class]]) {
+            [self.view addSubview:(UIView *)realSender];
+            ((UIView *)realSender).hidden = YES; // 挂载到视图层级，提供 UI 窗口上下文
         }
+        NSLog(@"[GM5] 成功实例化真 LPGMButton 对象: %@", realSender);
+    } else {
+        NSLog(@"[GM5] 警告: 未找到 LPGMButton 类，降级使用自身作为 sender");
+        realSender = sender;
+    }
+    
+    // 3. 触发调用链路
+    SEL gmSel = NSSelectorFromString(@"clickGMButtonWithButton:");
+    if ([self respondsToSelector:gmSel]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, realSender);
+        NSLog(@"[GM5] 已通过官方消息通道发送 clickGMButtonWithButton:");
+    } else {
+        // 兜底方案：直接调用底层构建器函数 (0x10059c638)
+        typedef void (*GMBuilderFunc)(id sender_btn);
+        GMBuilderFunc builder = (GMBuilderFunc)(base + 0x59c638);
+        @try {
+            builder(realSender);
+            NSLog(@"[GM5] 已通过函数指针直调构建器: 0x%lx", (uintptr_t)builder);
+        } @catch (NSException *e) {
+            NSLog(@"[GM5] 直调构建器异常: %@", e);
+        }
+    }
+    
+    // 4. 闸门回读验证 (构建器执行通过会自动将 B 清零)
+    if (pGateB) {
+        if (*pGateB == 0) {
+            NSLog(@"[GM5] 状态验证: Gate B 成功从 1 变为 0！说明构建器内部已完整放行！");
+            [sender setTitle:@"✓已激活" forState:UIControlStateNormal];
+        } else {
+            NSLog(@"[GM5] 状态验证: Gate B 仍为 1，可能在 Gate C (isa) 拦截。");
+        }
+    }
+    
+    // 5. 延迟 0.15 秒，进行视图树递归解隐与置顶兜底
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        GM_unhideViewsRecursively(self.view);
+        if (self.view.window) {
+            GM_unhideViewsRecursively(self.view.window);
+        }
+        
+        // 1.5 秒后恢复按钮文字
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [sender setTitle:@"★ GM ★" forState:UIControlStateNormal];
+        });
     });
 }
 
 // -------------------------------------------------------------
-// 【核心功能 2】：免看广告秒领奖
+// 【核心功能 2】：免看广告秒领奖（灵石+20）
 // -------------------------------------------------------------
 - (void)gm_onTapRewardButton:(GMSuspendButton *)sender {
     SEL rewardSel = NSSelectorFromString(@"gdt_rewardVideoAdDidRewardEffective:info:");
     if ([self respondsToSelector:rewardSel]) {
+        // 直接触发发奖代理回调，传入安全 nil 参数
         ((void (*)(id, SEL, id, id))objc_msgSend)(self, rewardSel, nil, nil);
         
+        // 视觉反馈
         [sender setTitle:@"✓已发放" forState:UIControlStateNormal];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [sender setTitle:@"⚡领奖励" forState:UIControlStateNormal];
         });
+        NSLog(@"[GM5] 成功触发免广告发奖回调！");
     }
 }
 
