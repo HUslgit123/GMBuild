@@ -1,18 +1,19 @@
 // =============================================================================
-// GMUnlocker.m —— 纯净安全版（彻底杜绝闪退 + 纯内存级过闸门 + 免广告发奖）
+// GMUnlocker.m —— 终极修复版（正规 Swift 对象初始化 + 寄存器上下文对齐 + 免广告发奖）
 // =============================================================================
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <mach-o/dyld.h>
+#import <sys/mman.h>
 #import <unistd.h>
 
 #define BTN_TAG_GM     77701
 #define BTN_TAG_AD     77702
 
 // -------------------------------------------------------------
-// 1. 悬浮拖拽按钮组件 (纯标准 UIKit 实现，绝对安全)
+// 1. 悬浮拖拽按钮组件 (标准 UIKit)
 // -------------------------------------------------------------
 @interface GMSuspendButton : UIButton
 @property (nonatomic, assign) CGPoint beginPoint;
@@ -36,14 +37,13 @@
 @end
 
 // -------------------------------------------------------------
-// 2. 辅助工具：安全类查找与视图安全解隐
+// 2. 辅助工具：安全获取 Class 与视图安全解隐
 // -------------------------------------------------------------
-static Class GM_safeFindLPGMButtonClass(uintptr_t base) {
-    // 1. 优先通过类名查找
+static Class GM_findLPGMButtonClass(uintptr_t base) {
     Class cls = NSClassFromString(@"LPGMButton");
     if (cls) return cls;
     
-    // 2. 遍历类名匹配 Swift 混淆后缀
+    // 遍历 Runtime 类列表（适配 Swift 名称混淆）
     unsigned int count = 0;
     Class *classes = objc_copyClassList(&count);
     if (classes) {
@@ -58,7 +58,7 @@ static Class GM_safeFindLPGMButtonClass(uintptr_t base) {
     }
     if (cls) return cls;
     
-    // 3. 兜底从 classref (0x100f1f568) 安全读取指针
+    // 兜底从 classref (0x100f1f568) 安全提取指针
     @try {
         uintptr_t classRefAddr = base + 0xf1f568;
         void *ptr = *(void **)classRefAddr;
@@ -70,7 +70,7 @@ static Class GM_safeFindLPGMButtonClass(uintptr_t base) {
     return cls;
 }
 
-// 递归遍历子视图，仅做安全解隐与置顶，绝不篡改 Frame 破坏 AutoLayout
+// 递归遍历子视图安全解隐与置顶
 static void GM_safeUnhideViews(UIView *rootView) {
     if (!rootView) return;
     for (UIView *subview in [rootView.subviews copy]) {
@@ -81,7 +81,7 @@ static void GM_safeUnhideViews(UIView *rootView) {
                 subview.alpha = 1.0;
                 subview.userInteractionEnabled = YES;
                 [subview.superview bringSubviewToFront:subview];
-                NSLog(@"[GM5] 成功解隐置顶 GM 视图: %@", clsName);
+                NSLog(@"[GM5] 成功解隐并置顶 GM 视图: %@", clsName);
             }
         }
         GM_safeUnhideViews(subview);
@@ -97,17 +97,17 @@ static void GM_safeUnhideViews(UIView *rootView) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         Method orig = class_getInstanceMethod(self, @selector(viewDidAppear:));
-        Method swiz = class_getInstanceMethod(self, @selector(gm_safe_viewDidAppear:));
+        Method swiz = class_getInstanceMethod(self, @selector(gm_final_viewDidAppear:));
         method_exchangeImplementations(orig, swiz);
     });
 }
 
-- (void)gm_safe_viewDidAppear:(BOOL)animated {
-    [self gm_safe_viewDidAppear:animated];
+- (void)gm_final_viewDidAppear:(BOOL)animated {
+    [self gm_final_viewDidAppear:animated];
     
     NSString *clsName = NSStringFromClass([self class]);
     
-    // 【背包界面】：仅添加红色 GM 悬浮控制器，杜绝复杂原生注入
+    // 【背包界面】：添加红色 GM 悬浮控制器
     if ([clsName containsString:@"BagViewController"] && ![self.view viewWithTag:BTN_TAG_GM]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             GMSuspendButton *btn = [self gm_createButtonWithTitle:@"★ GM ★"
@@ -156,53 +156,62 @@ static void GM_safeUnhideViews(UIView *rootView) {
 }
 
 // -------------------------------------------------------------
-// 【核心功能 1】：安全唤醒原生 GM 面板（纯内存构造 Sender，零 UI 污染）
+// 【核心功能 1】：安全唤醒原生 GM 面板（彻底根治闪退）
 // -------------------------------------------------------------
 - (void)gm_onTapGMButton:(GMSuspendButton *)sender {
     uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
     uintptr_t base  = 0x100000000 + slide;
     
-    // 1. 动态重写 Gate A (*pA = 0) 与 Gate B (*pB = 1)
+    // 1. 安全重写 Gate A (*pA = 0) 与 Gate B (*pB = 1)
     uint8_t *pGateA = (uint8_t *)(base + 0x00f504a8);
     uint8_t *pGateB = (uint8_t *)(base + 0x00f504a9);
     if (pGateA && pGateB) {
+        long pageSize = sysconf(_SC_PAGESIZE);
+        uintptr_t pageStart = ((uintptr_t)pGateA) & ~(pageSize - 1);
+        mprotect((void *)pageStart, pageSize, PROT_READ | PROT_WRITE);
         *pGateA = 0;
         *pGateB = 1;
+        NSLog(@"[GM5] 内存闸门已成功赋予初值: A=0, B=1");
     }
     
-    // 2. 仅在内存中分配一个合法的 LPGMButton 对象用于过 Gate C 的 isa 比对
-    Class gmClass = GM_safeFindLPGMButtonClass(base);
-    id fakeSender = nil;
+    // 2. 正规初始化 LPGMButton 实例（建立完整的 Swift 元数据与引用计数）
+    Class gmClass = GM_findLPGMButtonClass(base);
+    id realSender = nil;
     if (gmClass) {
         @try {
-            // 使用纯 Runtime 分配实例，不进入 UIKit 渲染树，杜绝崩溃
-            fakeSender = class_createInstance(gmClass, 0);
-        } @catch (NSException *e) {}
+            // 通过标准的 alloc/initWithFrame 正规初始化，杜绝 raw memory 引用计数崩溃
+            realSender = [[gmClass alloc] initWithFrame:CGRectZero];
+        } @catch (NSException *e) {
+            NSLog(@"[GM5] 标准初始化异常: %@", e);
+        }
     }
-    if (!fakeSender) {
-        fakeSender = sender;
+    if (!realSender) {
+        realSender = sender;
     }
     
-    // 3. 触发官方消息调用或底层构建函数
+    // 3. 必须通过 0x1005e5620 入口调用（保证 x20 = self 控制器上下文正确）
     SEL gmSel = NSSelectorFromString(@"clickGMButtonWithButton:");
     if ([self respondsToSelector:gmSel]) {
-        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, fakeSender);
+        ((void (*)(id, SEL, id))objc_msgSend)(self, gmSel, realSender);
     } else {
-        typedef void (*GMBuilderFunc)(id sender_btn);
-        GMBuilderFunc builder = (GMBuilderFunc)(base + 0x59c638);
+        typedef void (*GMEntryFunc)(id self_vc, SEL _cmd, id sender_btn);
+        GMEntryFunc entry = (GMEntryFunc)(base + 0x5e5620);
         @try {
-            builder(fakeSender);
-        } @catch (NSException *e) {}
+            entry(self, gmSel, realSender);
+        } @catch (NSException *e) {
+            NSLog(@"[GM5] 直调 0x1005e5620 异常: %@", e);
+        }
     }
     
-    // 4. 实时回读闸门状态（真实物理证据）
+    // 4. 实时回读验证（物理铁证）
     if (pGateB && *pGateB == 0) {
         [sender setTitle:@"✓放行成功" forState:UIControlStateNormal];
+        NSLog(@"[GM5] 物理验证: Gate B 已被游戏底层自动清零，全部三道闸门已完整放行！");
     } else {
         [sender setTitle:@"✗GateC拦截" forState:UIControlStateNormal];
     }
     
-    // 5. 延迟 0.15 秒，将构建出来的 GM 面板置顶显形
+    // 5. 延迟 0.15 秒打捞并置顶所有动态创建的 GM 面板
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         GM_safeUnhideViews(self.view);
         if (self.view.window) {
